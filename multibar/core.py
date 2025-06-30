@@ -1,10 +1,20 @@
+import os
 import time
 import random
 import threading
 from itertools import product
 from joblib import Parallel, delayed
 from multiprocessing import Manager
-from tqdm.auto import tqdm
+
+if "DATABRICKS_RUNTIME_VERSION" in os.environ and "DATABRICKS_JOB_RUN_ID" in os.environ:
+    from tqdm import tqdm ### use normal tqdm if multibar is imported in databricks job
+    from IPython.display import clear_output
+    _running_in_databricks_job = True
+else:
+    from tqdm.auto import tqdm
+    _running_in_databricks_job = False
+    
+
 
 _worker_context = threading.local()
 
@@ -103,6 +113,11 @@ def update_display(stop_event, completed_tasks, total_tasks, worker_statuses_dic
     while not stop_event.is_set():
         current_completed = completed_tasks.value
         overall_pbar.update(current_completed - last_completed)
+
+        if _running_in_databricks_job:
+            clear_output()
+            overall_pbar.refresh()
+            
         last_completed = current_completed
 
         for worker_id in range(num_workers):
@@ -113,7 +128,7 @@ def update_display(stop_event, completed_tasks, total_tasks, worker_statuses_dic
             if isinstance(status, tuple):
                 current, total = status
                 if worker_id not in worker_bars:
-                    worker_bars[worker_id] = tqdm(total=total, desc=f"Worker {worker_id}", position=worker_id + 1, leave=False)
+                    worker_bars[worker_id] = tqdm(total=total, desc=f"Worker {str(worker_id).zfill(3)}", position=worker_id + 1, leave=False)
                 bar = worker_bars[worker_id]
                 bar.total = total
                 bar.n = current
