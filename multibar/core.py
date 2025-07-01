@@ -7,17 +7,17 @@ from joblib import Parallel, delayed
 from multiprocessing import Manager
 
 if "DATABRICKS_RUNTIME_VERSION" in os.environ: # and "DATABRICKS_JOB_RUN_ID" in os.environ:
-    from tqdm import tqdm ### use normal tqdm if multibar is imported in databricks job
+    import sys
     from IPython.display import clear_output
     _running_in_databricks_job = True
-    print("Recognized databricks. Just using tqmd.tqdm now.")
+    print("Recognized databricks. Just using simple progress bars now.")
 else:
     from tqdm.auto import tqdm
     _running_in_databricks_job = False
-    
 
 
 _worker_context = threading.local()
+
 
 
 def set_worker_context(worker_id, worker_statuses_dict):
@@ -88,6 +88,76 @@ def expand_task_params(task_params):
         ]
 
 
+def format_simple_progress_bar(current, total, width=30, desc=""):
+    frac = current / total if total else 0
+    filled = int(width * frac)
+    bar = "#" * filled + "-" * (width - filled)
+    percent = frac * 100
+    return f"{desc} [{bar}] {current}/{total} ({percent:.1f}%)"
+
+
+def update_simple_progress_bars(stop_event, completed_tasks, total_tasks, worker_statuses_dict, num_workers, desc):
+    last_completed = 0
+
+    while not stop_event.is_set():
+        current_completed = completed_tasks.value
+        overall_bar = format_simple_progress_bar(current_completed, total_tasks, desc=desc)
+
+        lines = [overall_bar]
+        for worker_id in range(num_workers):
+            status = worker_statuses_dict.get(worker_id, (0, 0))
+            if isinstance(status, tuple):
+                current, total = status
+                line = format_simple_progress_bar(current, total or 1, desc=f"Worker {worker_id:03d}")
+                lines.append(line)
+
+        output = "\n".join(lines)
+
+        clear_output(wait=True)
+        print(output)
+        if current_completed == total_tasks:
+            break
+        time.sleep(0.2)
+    print()
+
+
+def update_tqdm_bars(stop_event, completed_tasks, total_tasks, worker_statuses_dict, num_workers, desc):
+    overall_pbar = tqdm(total=total_tasks, desc=desc, position=0)
+    worker_bars = {}
+
+    last_completed = 0
+
+    while not stop_event.is_set():
+        current_completed = completed_tasks.value
+        overall_pbar.update(current_completed - last_completed)
+            
+        last_completed = current_completed
+
+        for worker_id in range(num_workers):
+            status = worker_statuses_dict.get(worker_id, None)
+            if status is None:
+                continue
+
+            if isinstance(status, tuple):
+                current, total = status
+                if worker_id not in worker_bars:
+                    worker_bars[worker_id] = tqdm(total=total, desc=f"Worker {str(worker_id).zfill(3)}", position=worker_id + 1, leave=False)
+                bar = worker_bars[worker_id]
+                if total != bar.total:
+                    bar.reset(total=total)
+                bar.n = current
+                bar.refresh()
+
+        if current_completed == total_tasks:
+            break
+
+        time.sleep(0.2)
+
+    for bar in worker_bars.values():
+        bar.close()
+    overall_pbar.close()
+
+
 def update_display(stop_event, completed_tasks, total_tasks, worker_statuses_dict, num_workers, desc):
     """
     Displays a progress bar for the overall progress of all tasks and 
@@ -106,43 +176,10 @@ def update_display(stop_event, completed_tasks, total_tasks, worker_statuses_dic
     Note: This function should be called in a separate thread because it blocks until all tasks
     have been completed.
     """
-    overall_pbar = tqdm(total=total_tasks, desc=desc, position=0)
-    worker_bars = {}
-
-    last_completed = 0
-
-    while not stop_event.is_set():
-        current_completed = completed_tasks.value
-        overall_pbar.update(current_completed - last_completed)
-
-        if _running_in_databricks_job:
-            clear_output()
-            overall_pbar.refresh()
-            
-        last_completed = current_completed
-
-        for worker_id in range(num_workers):
-            status = worker_statuses_dict.get(worker_id, None)
-            if status is None:
-                continue
-
-            if isinstance(status, tuple):
-                current, total = status
-                if worker_id not in worker_bars:
-                    worker_bars[worker_id] = tqdm(total=total, desc=f"Worker {str(worker_id).zfill(3)}", position=worker_id + 1, leave=False)
-                bar = worker_bars[worker_id]
-                bar.total = total
-                bar.n = current
-                bar.refresh()
-
-        if current_completed == total_tasks:
-            break
-
-        time.sleep(0.2)
-
-    for bar in worker_bars.values():
-        bar.close()
-    overall_pbar.close()
+    if _running_in_databricks_job:
+        update_simple_progress_bars(stop_event, completed_tasks, total_tasks, worker_statuses_dict, num_workers, desc)
+    else:
+        update_tqdm_bars(stop_event, completed_tasks, total_tasks, worker_statuses_dict, num_workers, desc)
 
 
 def auto_progress(iterable):
@@ -218,6 +255,7 @@ def test_function(a, b):
         time.sleep(0.2) # random.uniform(0.03, 0.10)
     return total_steps
  
+
 def multibar(task, task_params, n_jobs=2, backend="multiprocessing", desc="Overall Progress"):
     """
     Execute a task with multiple parameters in parallel using joblib's Parallel.
