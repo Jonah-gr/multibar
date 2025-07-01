@@ -6,10 +6,11 @@ from itertools import product
 from joblib import Parallel, delayed
 from multiprocessing import Manager
 
-if "DATABRICKS_RUNTIME_VERSION" in os.environ and "DATABRICKS_JOB_RUN_ID" in os.environ:
+if "DATABRICKS_RUNTIME_VERSION" in os.environ: # and "DATABRICKS_JOB_RUN_ID" in os.environ:
     from tqdm import tqdm ### use normal tqdm if multibar is imported in databricks job
     from IPython.display import clear_output
     _running_in_databricks_job = True
+    print("Recognized databricks. Just using tqmd.tqdm now.")
 else:
     from tqdm.auto import tqdm
     _running_in_databricks_job = False
